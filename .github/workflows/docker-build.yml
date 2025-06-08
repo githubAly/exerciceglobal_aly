@@ -4,26 +4,82 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
 
 jobs:
-  push_to_docker_hub:
+  build-and-push:
     runs-on: ubuntu-latest
+    name: 🐳 Build & Push PrestaShop Image
 
     steps:
-      - name: Checkout du code
+      - name: 📥 Checkout du code
         uses: actions/checkout@v4
 
-      - name: Connexion à Docker Hub
-        uses: docker/login-action@v2
+      - name: 🔍 Validation du Dockerfile
+        run: |
+          echo "🔍 Validation du Dockerfile PrestaShop..."
+          if [ ! -f Dockerfile ]; then
+            echo "❌ Dockerfile manquant"
+            exit 1
+          fi
+          echo "✅ Dockerfile trouvé"
+
+      - name: 🧪 Test de construction
+        run: |
+          echo "🧪 Test de construction de l'image..."
+          docker build -t test-prestashop .
+          echo "✅ Image construite avec succès"
+
+      - name: 🔐 Connexion à Docker Hub
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Construction de l’image
-        run: docker build -t ${{ secrets.DOCKER_USERNAME }}/flask_app:latest .
+      - name: 🏗️ Configuration Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Tag de l’image
-        run: docker tag ${{ secrets.DOCKER_USERNAME }}/flask_app:latest docker.io/${{ secrets.DOCKER_USERNAME }}/flask_app:latest
+      - name: 🏷️ Génération des tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKER_USERNAME }}/prestashop-custom
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Push de l’image
-        run: docker push docker.io/${{ secrets.DOCKER_USERNAME }}/flask_app:latest
+      - name: 🐳 Build et Push de l'image PrestaShop
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 🧪 Test de l'image publiée
+        run: |
+          echo "🧪 Test de l'image publiée..."
+          docker pull ${{ secrets.DOCKER_USERNAME }}/prestashop-custom:latest
+          docker run -d --name test-container ${{ secrets.DOCKER_USERNAME }}/prestashop-custom:latest
+          sleep 10
+          if docker ps | grep test-container; then
+            echo "✅ Image opérationnelle"
+          else
+            echo "❌ Problème avec l'image"
+            docker logs test-container
+            exit 1
+          fi
+          docker stop test-container
+          docker rm test-container
+
+      - name: 📊 Résumé
+        run: |
+          echo "## 🐳 Image PrestaShop publiée" >> $GITHUB_STEP_SUMMARY
+          echo "**Repository:** ${{ secrets.DOCKER_USERNAME }}/prestashop-custom" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags:** latest, ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY

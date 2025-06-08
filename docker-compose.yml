@@ -1,6 +1,20 @@
+version: '3.8'
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+
+volumes:
+  prestashop_data:
+  mysql_data:
+
 services:
   prestashop:
-    image: prestashop/prestashop:latest
+    build: .
+    container_name: prestashop_app
+    restart: unless-stopped
     ports:
       - "9090:80"
     environment:
@@ -8,13 +22,22 @@ services:
       DB_NAME: prestashop
       DB_USER: prestashop
       DB_PASSWORD: psswrd
+      PS_DOMAIN: localhost
+      PS_COUNTRY: FR
+      PS_LANGUAGE: fr
+      PS_INSTALL_AUTO: 1
     volumes:
       - prestashop_data:/var/www/html
+    networks:
+      - frontend
+      - backend
     depends_on:
       - db
 
   db:
     image: mysql:5.7
+    container_name: prestashop_mysql
+    restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: prestashop
@@ -22,17 +45,39 @@ services:
       MYSQL_PASSWORD: psswrd
     volumes:
       - mysql_data:/var/lib/mysql
+    networks:
+      - backend
+    command: --default-authentication-plugin=mysql_native_password
 
   phpmyadmin:
     image: phpmyadmin/phpmyadmin
+    container_name: prestashop_phpmyadmin
+    restart: unless-stopped
     ports:
-      - "8081:80"
+      - "8082:80"
     environment:
       PMA_HOST: db
       MYSQL_ROOT_PASSWORD: root
+      PMA_ARBITRARY: 1
+    networks:
+      - frontend
+      - backend
     depends_on:
       - db
 
-volumes:
-  prestashop_data:
-  mysql_data:
+  nginx:
+    image: nginx:alpine
+    container_name: prestashop_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"    # ← Ajouter le port HTTPS
+      - "8080:8080"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro    # ← Ajouter le montage SSL
+    networks:
+      - frontend
+    depends_on:
+      - prestashop
+      - phpmyadmin
