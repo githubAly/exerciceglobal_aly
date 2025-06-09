@@ -14,6 +14,7 @@ volumes:
   grafana_data:
   prometheus_data:
   alertmanager_data:
+  mysql_backups:
 
 services:
   prestashop:
@@ -141,7 +142,6 @@ services:
     privileged: true
     devices:
       - /dev/kmsg
-    # Ajout d'options pour réduire les erreurs cAdvisor
     command:
       - '--housekeeping_interval=30s'
       - '--max_housekeeping_interval=35s'
@@ -203,3 +203,43 @@ services:
       - '--config.file=/etc/alertmanager/alertmanager.yml'
       - '--storage.path=/alertmanager'
       - '--web.external-url=http://localhost:9093'
+
+  backup:
+    image: alpine:latest
+    container_name: mysql_backup
+    restart: unless-stopped
+    volumes:
+      - mysql_backups:/backups
+    environment:
+      - MYSQL_HOST=db
+      - MYSQL_USER=prestashop
+      - MYSQL_PASSWORD=psswrd
+      - MYSQL_DATABASE=prestashop
+      - MAX_BACKUPS=5
+    networks:
+      - backend
+    depends_on:
+      - db
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        apk add --no-cache mysql-client bash
+        while true; do
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+          BACKUP_FILE="/backups/${MYSQL_DATABASE}_backup_${TIMESTAMP}.sql.gz"
+          echo "Starting backup to $BACKUP_FILE"
+          mysqldump -h "$MYSQL_HOST" -u "$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" | gzip > "$BACKUP_FILE"
+          echo "Backup done."
+
+          COUNT=$(ls -1 /backups/*.sql.gz 2>/dev/null | wc -l)
+          if [ "$COUNT" -gt "$MAX_BACKUPS" ]; then
+            FILES_TO_DELETE=$(ls -1t /backups/*.sql.gz | tail -n +$(($MAX_BACKUPS + 1)))
+            echo "Removing old backups:"
+            echo "$FILES_TO_DELETE"
+            rm -f $FILES_TO_DELETE
+          fi
+
+          echo "Sleeping for 6 hours..."
+          sleep 21600
+        done
