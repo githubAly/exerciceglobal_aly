@@ -5,18 +5,23 @@ networks:
     driver: bridge
   backend:
     driver: bridge
+  monitoring:
+    driver: bridge
 
 volumes:
   prestashop_data:
   mysql_data:
+  grafana_data:
+  prometheus_data:
+  alertmanager_data:
 
 services:
   prestashop:
-    build: .
+    image: prestashop/prestashop:8.1-apache
     container_name: prestashop_app
     restart: unless-stopped
     ports:
-      - "9090:80"
+      - "8080:80"
     environment:
       DB_SERVER: db
       DB_NAME: prestashop
@@ -25,12 +30,12 @@ services:
       PS_DOMAIN: localhost
       PS_COUNTRY: FR
       PS_LANGUAGE: fr
-      PS_INSTALL_AUTO: 1
     volumes:
       - prestashop_data:/var/www/html
     networks:
       - frontend
       - backend
+      - monitoring
     depends_on:
       - db
 
@@ -47,14 +52,13 @@ services:
       - mysql_data:/var/lib/mysql
     networks:
       - backend
-    command: --default-authentication-plugin=mysql_native_password
+      - monitoring
+    command: --default-authentication-plugin=mysql_native_password --explicit_defaults_for_timestamp
 
   phpmyadmin:
     image: phpmyadmin/phpmyadmin
     container_name: prestashop_phpmyadmin
     restart: unless-stopped
-    ports:
-      - "8082:80"
     environment:
       PMA_HOST: db
       MYSQL_ROOT_PASSWORD: root
@@ -62,22 +66,140 @@ services:
     networks:
       - frontend
       - backend
+      - monitoring 
     depends_on:
       - db
 
   nginx:
-    image: nginx:alpine
+    image: nginx:1.24-alpine
     container_name: prestashop_nginx
     restart: unless-stopped
     ports:
       - "80:80"
-      - "443:443"    # ← Ajouter le port HTTPS
-      - "8080:8080"
+      - "443:443"
+      - "8082:8081"  # CHANGÉ: Port externe 8082 au lieu de 8081
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/ssl:/etc/nginx/ssl:ro    # ← Ajouter le montage SSL
+      - ./nginx/ssl:/etc/nginx/ssl:ro
     networks:
       - frontend
+      - monitoring    
     depends_on:
       - prestashop
       - phpmyadmin
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    ports:
+      - "9091:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.external-url=http://localhost:9091'
+      - '--storage.tsdb.retention.time=15d'
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./monitoring/prometheus/rules:/etc/prometheus/rules
+      - prometheus_data:/prometheus
+    networks:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=grafana123
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+    networks:
+      - monitoring
+      - frontend
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    restart: unless-stopped
+    ports:
+      - "8083:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks:
+      - monitoring
+    privileged: true
+    devices:
+      - /dev/kmsg
+    # Ajout d'options pour réduire les erreurs cAdvisor
+    command:
+      - '--housekeeping_interval=30s'
+      - '--max_housekeeping_interval=35s'
+      - '--event_storage_event_limit=default=0'
+      - '--event_storage_age_limit=default=0'
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node_exporter
+    restart: unless-stopped
+    ports:
+      - "9100:9100"
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--no-collector.netstat'
+      - '--no-collector.softnet'
+      - '--no-collector.netdev'
+      - '--no-collector.sockstat'
+      - '--no-collector.netclass'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/.+|rootfs/mnt/wsl/.+)($$|/)'
+      - '--collector.filesystem.fs-types-exclude=^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|iso9660|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs)$$'
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    networks:
+      - monitoring
+
+  mysql-exporter:
+    image: prom/mysqld-exporter:v0.15.1
+    container_name: mysql_exporter
+    restart: unless-stopped
+    ports:
+      - "9104:9104"
+    volumes:
+      - ./monitoring/mysql/.my.cnf:/etc/mysql/.my.cnf:ro
+    command:
+      - --config.my-cnf=/etc/mysql/.my.cnf
+    networks:
+      - backend
+      - monitoring
+    depends_on:
+      - db
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: alertmanager
+    restart: unless-stopped
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml
+      - alertmanager_data:/alertmanager
+    networks:
+      - monitoring
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+      - '--web.external-url=http://localhost:9093'
